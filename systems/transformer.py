@@ -8,7 +8,6 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from train import batches
 
@@ -45,7 +44,7 @@ class HighlightTransformer(nn.Module):
         # X:（バッチ, 秒数, 次元） M:（バッチ, 秒数） 有効な秒が True
         h = self.inp(X) * math.sqrt(D_MODEL) + positional_encoding(X.shape[1], D_MODEL, X.device)
         h = self.encoder(self.drop(h), src_key_padding_mask=~M)  # 詰め物（False）は注意の対象から外す
-        return self.head(self.norm(h)).squeeze(-1)  # （バッチ, 秒数）のロジット
+        return self.head(self.norm(h)).squeeze(-1)  # （バッチ, 秒数）のスコア
 
 
 def build_model(in_dim):
@@ -57,8 +56,7 @@ def train_one_epoch(model, data, opt, args, dev, rng):
     total, n = 0.0, 0
     for _, X, Y, M in batches(data, args.batch_size, dev, rng):
         P = model(X, M)
-        loss = F.binary_cross_entropy_with_logits(P, Y, reduction="none")
-        loss = (loss * M).sum() / M.sum()  # 詰め物の秒は損失に含めない
+        loss = ((P - Y) ** 2)[M].mean()  # 詰め物の秒は除いて平均二乗誤差
         opt.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), CLIP)

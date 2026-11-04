@@ -234,8 +234,8 @@ def train_one_epoch(model, data, opt, args, dev, rng):
 | dropout                                        | 0.1                                                     | 一般的な値                                                                               |
 | `norm_first=True`（Pre-LN）                    | —                                                       | lr=1e-3 固定でも学習が安定しやすい。最後に `LayerNorm` を1つ足す                         |
 | マスク                                         | `src_key_padding_mask=~M`                               | `M` は有効な秒が True なので反転して渡す。詰め物ありとなしで出力が一致することを確認済み |
-| 出力                                           | ロジット（`nn.Linear(128, 1)`）                         | 評価前に動画ごとに0〜1へ正規化されるので、sigmoid は掛けない                             |
-| 損失                                           | `binary_cross_entropy_with_logits` を有効な秒だけで平均 | 正解が0〜1なので BCE が使える                                                            |
+| 出力                                           | スコア（`nn.Linear(128, 1)`）                           | 正解に直接近づける値。評価前に動画ごとに0〜1へ正規化されるので、sigmoid は掛けない       |
+| 損失                                           | `((P - Y) ** 2)[M].mean()`（有効な秒だけの平均二乗誤差） | チームで MSE に統一。`val_error` と同じ考え方（`_smoke.py` と同じ書き方）                |
 | 勾配クリッピング                               | `clip_grad_norm_(..., 1.0)`                             | 学習率を変えずに、学習が暴れるのを防ぐ                                                   |
 
 - 値はファイルの先頭の定数（`D_MODEL` `N_HEAD` `N_LAYERS` `D_FF` `DROPOUT` `CLIP`）で変えられる
@@ -485,3 +485,4 @@ sbatch -J train_transformer_visual -p a100_3g --gres=gpu:3g.40gb:1 \
 | 2026-11-04 | 学習（EI） | main（d76d96e） | `systems/transformer.py`（新規）、`EI.md` | EI.md 末尾に貼っていたコードを `systems/transformer.py` として追加し、main に直接 push。EI.md を現在のリポジトリに合わせて更新し、個人用（Git 外）にした | なし（他の人のファイル・共通部分は変更なし） |
 | 2026-11-04 | 学習（EI） | —             | `EI.md` | 記録履歴を9章にし、8章に transformer をサーバで学習させる手順を追加 | なし |
 | 2026-11-04 | 学習（EI） | main | `EI.md` | EI.md を Git の除外設定から外し、コミット・push するように変更 | なし |
+| 2026-11-04 | 学習（EI） | main | `systems/transformer.py`、`EI.md` | 損失を BCE から平均二乗誤差（MSE）に変更（チームの統一に合わせる） | なし |

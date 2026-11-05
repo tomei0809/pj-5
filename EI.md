@@ -1,6 +1,7 @@
 # EI.md ― 個人用の詳細メモ（EI）
 
 **このファイルは個人用のメモ。自分のリポジトリ（tomei0809/pj-5）には Git で入れて push する**。
+リモートは `origin` = 自分のリポジトリ（tomei0809/pj-5）、`upstream` = チームのリポジトリ（tkg-tus/pj-5）。チームの変更は `git pull upstream main` で取り込む。
 README.md は「使い方」、この EI.md は「決まりごと・詳細・注意点・変更の記録」を自分用にまとめる場所。
 内容を変えたら、最後の「9. コードの追加修正の記録履歴」に1行書く。
 
@@ -32,7 +33,7 @@ data/features/{visual,audio,text}/{video_id}.npy   形（秒数, 次元）
   │  train.py + systems/{system}.py  特徴量 + 正解 → モデルを学習
   ▼
 runs/{system}_{modality}_seed{n}/   best.pt, pred_val.csv, summary.json
-  │  評価スクリプト・統合（評価・統合担当）
+  │  evaluation/highlight_eval.py   評価（compare）・統合（ensemble）・切り抜き区間（clips）
   ▼
 統合スコア（video_id, t, score）
   │  highlight/predict.py → highlight/clip.py
@@ -71,8 +72,9 @@ runs/{system}_{modality}_seed{n}/   best.pt, pred_val.csv, summary.json
 | 学習率     | 全員同じ固定値（`train.py` の既定 `--lr 1e-3`。値は確定待ち → 5章）                                                                                                                                                            |
 | エポック   | 最大50。valの基準が5回続けて改善しなければ終了し、一番良かった時点のモデルを使う<br>（README の「(？)」の部分は `train.py` に実装済み：`--max_epochs 50` `--patience 5`、最良時点を `best.pt` に保存し、最後に読み戻して予測） |
 | シード     | 0・1・2 の3回（`jobs/train.sbatch` が順に実行）                                                                                                                                                                                |
-| 環境       | uv の環境を統一（`.python-version` = 3.12、`pyproject.toml` = `torch>=2.13.0`（CUDA 13.2 版）、`numpy`、`h5py`、`fsspec[http]`、`matplotlib`）。`uv.lock` はコミット済み → 全員 `uv sync --locked`                          |
-| 評価       | 方法は全員共通（検討中）。判断はすべて val、test は最後に一度だけ                                                                                                                                                              |
+| 環境       | uv の環境を統一（`.python-version` = 3.12、`pyproject.toml` = `torch>=2.13.0`（CUDA 13.2 版）、`numpy`、`h5py`、`fsspec[http]`、`matplotlib`、`scipy>=1.18.1`、`pandas>=3.1.0`）。`uv.lock` はコミット済み → 全員 `uv sync --locked` |
+| 評価       | `evaluation/highlight_eval.py` で全員同じ指標（Spearman ρ・MAE・上位10%の重なり）。判断はすべて val、test は最後に一度だけ。`train.py` の `val_error`（早期終了の判断）はまだ仮の二乗誤差 |
+| 損失       | 平均二乗誤差（MSE）で統一。詰め物の秒は除いて平均する（`_smoke.py`・`gru.py`・`transformer.py` とも同じ） |
 | 記録       | 学習時間・パラメータ数・使ったGPU は `train.py` が `summary.json` に自動で記録                                                                                                                                                 |
 
 ### 1.5 使用データ
@@ -90,13 +92,15 @@ runs/{system}_{modality}_seed{n}/   best.pt, pred_val.csv, summary.json
 | 種類         | 形式 | 置き場所                                           | 中身                                                            |
 | ------------ | ---- | -------------------------------------------------- | --------------------------------------------------------------- |
 | 特徴量       | npy  | `data/features/{visual,audio,text}/{video_id}.npy` | 形（秒数, 次元）float32                                         |
-| 正解ラベル   | npy  | `data/labels/{video_id}.npy`                       | 形（秒数,）0〜1。今は MoSu の `gt_score` をそのまま使う仮のもの |
+| 正解ラベル   | npy  | `data/labels/{video_id}.npy`                       | 形（秒数,）0〜1。今は MoSu の `gt_score` をそのまま使う仮のもの（学習用） |
+| 正解CSV      | CSV  | （評価・統合担当が作成）                           | `video_id,t,score`。`highlight_eval.py labels` で gt_score から作る（評価用、動画ごとに0〜1） |
 | 分割         | txt  | `data/splits/{train,val,test}.txt`                 | 1行に1つの動画ID                                                |
 | 予測         | CSV  | `runs/.../pred_val.csv`                            | `video_id,t,score`。score は動画ごとに0〜1へ正規化              |
-| 切り抜き区間 | CSV  | （未定）                                           | `video_id,rank,start,end`                                       |
+| 切り抜き区間 | CSV  | （置き場所は未定）                                 | `video_id,rank,start_sec,end_sec_exclusive,mean_score`（`highlight_eval.py clips`） |
 | 学習記録     | JSON | `runs/.../summary.json`                            | best_epoch, best_val_error, train_sec, n_params, gpu, args, log |
 
 - 特徴量と正解の秒数がずれているときは、`train.py` が短い方に合わせる
+- `highlight_eval.py` は秒数が少しでもずれるとエラーにする（`t` は0始まりの連続した整数、score は0〜1）
 - 予測CSVの例：
 
 ```csv
@@ -113,7 +117,7 @@ abc123,1,0.850000
 pj-5/
 ├── README.md               使い方（環境構築・GPUテスト・学習の実行・出力）
 ├── EI.md                   このファイル（個人用のメモ。Git に入れる）
-├── pyproject.toml          依存パッケージ（torch, numpy, h5py, fsspec, matplotlib）と PyTorch の取得先
+├── pyproject.toml          依存パッケージ（torch, numpy, h5py, fsspec, matplotlib, scipy, pandas）と PyTorch の取得先
 ├── uv.lock                 環境の固定（コミット済み）
 ├── .python-version         Python 3.12
 ├── .gitignore              データ・学習結果・動画などを Git から除外
@@ -123,7 +127,10 @@ pj-5/
 │   ├── __init__.py         （空。systems をパッケージにするため）
 │   ├── _template.py        各自の実装の雛形
 │   ├── _smoke.py           GPU で動くか確かめるテスト用モデル（2段の1次元CNN）
-│   └── transformer.py      Transformer Encoder（学習・EI、未push）
+│   ├── gru.py              双方向 GRU（GRUScorer）
+│   └── transformer.py      Transformer Encoder（学習・EI）
+├── evaluation/
+│   └── highlight_eval.py   評価・比較・統合・切り抜き区間・グラフ（評価・統合担当）
 ├── tools/
 │   ├── prepare_mosu.py     MoSu の train/val から動画を選んで train.py の形に変換（--remote 対応）
 │   ├── make_fake_data.py   動作確認用の偽データ（data_fake/）
@@ -152,10 +159,11 @@ pj-5/
 | ファイル                       | 役割                                                      | 状態                                                    | 編集してよい人                                           |
 | ------------------------------ | --------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------- |
 | `train.py`                     | データ読み込み、バッチ化、早期終了、予測CSV・summary 出力 | 動作する                                                | **全員に相談してから**（共通部分）                       |
-| `train.py` の `val_error`      | 学習を止める判断用の値（仮：正規化後の二乗誤差）          | 仮                                                      | 評価・統合担当（評価方法が決まったらここだけ差し替える） |
+| `train.py` の `val_error`      | 学習を止める判断用の値（仮：正規化後の二乗誤差）          | 仮（評価の指標は `highlight_eval.py` にできたが、ここはまだ差し替えていない） | 評価・統合担当（差し替えるときは全員に相談）             |
 | `systems/_template.py`         | 雛形                                                      | —                                                       | 変更しない（コピーして使う）                             |
 | `systems/_smoke.py`            | GPU 動作確認用のテストモデル                              | 動作する                                                | 変更しない                                               |
-| `systems/{名前}.py`            | 各自のモデルと学習                                        | `transformer.py` は作成済み（未push）。1次元CNN・GRU も実装済み（未push） | その人だけ                                               |
+| `systems/{名前}.py`            | 各自のモデルと学習                                        | `gru.py`・`transformer.py` はチームのリポジトリに入っている。1次元CNN は未push | その人だけ                                               |
+| `evaluation/highlight_eval.py` | 正解CSV作成・評価・比較・統合・切り抜き区間・グラフ       | 動作する                                                | 評価・統合担当                                           |
 | `features/extract_features.py` | `extract_visual / extract_audio / extract_text`           | 未実装                                                  | 担当未定（MoSu 以外の動画を使うときに必要）              |
 | `highlight/predict.py`         | `load_model / predict_scores`                             | 未実装                                                  | 担当未定                                                 |
 | `highlight/clip.py`            | `select_segments / cut_clip`                              | 未実装                                                  | 担当未定                                                 |
@@ -195,9 +203,9 @@ def train_one_epoch(model, data, opt, args, dev, rng):
 | 手法                       | 内容                               | 難易度 | おすすめ度 | 長所                                           | 短所                                            | 実装メモ                                                                     |
 | -------------------------- | ---------------------------------- | ------ | ---------- | ---------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------- |
 | 1次元CNN                   | 時間方向の畳み込み                 | ★☆☆☆☆  | 済         | 速い・安定                                     | 近くの秒しか見えない                            | 実装済み                                                                     |
-| GRU                        | 再帰で時間順に処理                 | ★★☆☆☆  | 済         | 前後の流れを使える                             | 長い動画で遅い                                  | 実装済み                                                                     |
+| GRU                        | 再帰で時間順に処理                 | ★★☆☆☆  | 済         | 前後の流れを使える                             | 長い動画で遅い                                  | `systems/gru.py`（双方向・`pack_padded_sequence`）で実装済み                   |
 | MLP（ベースライン）        | 各秒を独立に全結合                 | ★☆☆☆☆  | ★★★☆☆      | 比較の基準になる                               | 時間の流れを使わない                            | `nn.Sequential` だけで済む                                                   |
-| 双方向LSTM / GRU           | 前後両方向の再帰                   | ★★☆☆☆  | ★★★☆☆      | 未来の文脈も使える                             | GRU と結果が近くなりやすい                      | `bidirectional=True`。詰め物の影響を避けるため `pack_padded_sequence` を使う |
+| 双方向LSTM                 | 前後両方向の再帰                   | ★★☆☆☆  | ★★☆☆☆      | 未来の文脈も使える                             | 双方向 GRU（`gru.py`）と結果が近くなりやすい    | `gru.py` の `nn.GRU` を `nn.LSTM` に変えるだけ                                 |
 | **TCN**（拡張畳み込み）    | dilation を倍々にした1次元CNN      | ★★☆☆☆  | ★★★★☆      | CNN の速さで広い範囲を見られる                 | 層の設計が必要                                  | `nn.Conv1d(..., dilation=2**i, padding=...)` を積む。出力に `M` を掛ける     |
 | **Transformer Encoder**    | 自己注意で動画全体を見る           | ★★★☆☆  | 済         | 遠く離れた秒の関係も使える。見どころ推定の定番 | 長い動画でメモリ大（秒数の2乗）                 | `systems/transformer.py` で実装済み（3.2 参照）                              |
 | CNN + Transformer          | CNN で局所特徴 → Transformer       | ★★★☆☆  | ★★★★☆      | 局所と全体の両方                               | パラメータが増える                              | 既存の CNN を前段に流用できる                                                |
@@ -205,23 +213,24 @@ def train_one_epoch(model, data, opt, args, dev, rng):
 | 1次元 U-Net                | 縮小→拡大の畳み込み + スキップ接続 | ★★★☆☆  | ★★★☆☆      | 粗い流れと細かい変化の両方                     | 秒数が割り切れないときの処理                    | 末尾を詰めてから戻す                                                         |
 | Mamba / S4 系              | 状態空間モデル                     | ★★★★★  | ★★☆☆☆      | 長い系列を線形時間で                           | 追加ライブラリ・CUDA 依存、環境統一が崩れやすい | 入れるなら全員に相談（`pyproject.toml` が変わる）                            |
 
-**おすすめの順番**：Transformer Encoder → TCN → 双方向LSTM（CNN・GRU との比較がしやすい）
+**おすすめの順番**：Transformer Encoder（済）→ TCN → CNN + Transformer（CNN・GRU との比較がしやすい）
 
 ### 3.1 1次元CNN・GRU・Transformer Encoder の比較
 
-実装済みの3つを、手法としての一般的な性質で比べたもの。CNN・GRU の細かい設定（層数・幅など）は、push したあとで各自が追記する。
+実装済みの3つを比べたもの。GRU は `systems/gru.py`（双方向・隠れ64・1層、出力に sigmoid）、Transformer は `systems/transformer.py` の設定で書いている。1次元CNN の細かい設定は push したあとで追記する。
 
 | 観点                   | 1次元CNN                                | GRU                                            | Transformer Encoder                                              |
 | ---------------------- | --------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------- |
-| 見える範囲             | カーネル幅 × 層数の近くの秒だけ         | 前から順に積み上げた流れ（単方向なら過去だけ） | 動画全体のすべての秒を一度に見る                                 |
+| 見える範囲             | カーネル幅 × 層数の近くの秒だけ         | 前後両方向から積み上げた流れ（双方向）         | 動画全体のすべての秒を一度に見る                                 |
 | 計算量・メモリ         | 秒数に比例（軽い）                      | 秒数に比例                                     | **秒数の2乗**（長い動画で重い）                                  |
 | 並列化・速度           | 時間方向も並列で速い                    | 1秒ずつ順番に処理するので遅い                  | 並列で速い（ただし長い動画ではメモリが先に足りなくなる）         |
 | 長い動画               | 遠くの秒は見えない                      | 遠くの情報が薄れやすい                         | 遠くの秒も直接見られるが、メモリが課題                           |
 | 位置（順番）の情報     | 畳み込みが自然に持つ                    | 処理の順番が自然に持つ                         | 持たないので**位置エンコーディングが必要**                       |
-| 詰め物 `M` の扱い      | 出力に `M` を掛ける。端で詰め物が混ざる | `pack_padded_sequence` か、最後に `M` で除く   | `src_key_padding_mask=~M` で注意の対象から外せる（混ざらない）   |
-| lr=1e-3 固定での安定性 | 安定                                    | おおむね安定（勾配クリッピングがあると安心）   | やや不安定になりやすい → Pre-LN と勾配クリッピングで対策         |
-| パラメータ数の目安     | 少ない                                  | 中くらい                                       | 中くらい（`transformer.py` の設定で約36万、入力768次元の場合）   |
+| 詰め物 `M` の扱い      | 出力に `M` を掛ける。端で詰め物が混ざる | `pack_padded_sequence` で詰め物を除いて処理    | `src_key_padding_mask=~M` で注意の対象から外せる（混ざらない）   |
+| lr=1e-3 固定での安定性 | 安定                                    | おおむね安定（`gru.py` は勾配クリッピングなし） | やや不安定になりやすい → Pre-LN と勾配クリッピングで対策         |
+| パラメータ数の目安     | 少ない                                  | 約32万（`gru.py`、入力768次元の場合）          | 約36万（`transformer.py`、入力768次元の場合）                    |
 | 得意な見どころの形     | 短く急な変化（盛り上がりの瞬間）        | 前後の流れでだんだん高まる場面                 | 動画全体の中で「どこが一番か」の相対的な判断                     |
+| 出力・損失             | —                                       | sigmoid で0〜1、MSE                            | そのままのスコア、MSE                                            |
 | 比べるときに見るところ | 速さ・安定性の基準                      | CNN との差＝流れを使う効果                     | CNN・GRU との差＝全体を見る効果。学習時間と GPU メモリも記録する |
 
 ### 3.2 systems/transformer.py の設定
@@ -320,15 +329,15 @@ main                      いつでも動く状態。直接 push しない
 
 | 項目                                  | 状態   | 担当                        | 決定日 | 内容・メモ                                                                                       |
 | ------------------------------------- | ------ | --------------------------- | ------ | ------------------------------------------------------------------------------------------------ |
-| 評価方法（共通の指標）                | 検討中 | 評価・統合                  |        | 候補：Kendall τ、Spearman ρ、上位区間の F1 など。決まったら `train.py` の `val_error` を差し替え |
+| 評価方法（共通の指標）                | 実装済 | 評価・統合                  |        | `evaluation/highlight_eval.py` に Spearman ρ・MAE・上位10%の重なり（top10_overlap）を実装。`train.py` の `val_error` はまだ仮のまま |
 | 学習率の値                            | 未確定 | 全員                        |        | 今は `train.py` の既定 1e-3                                                                      |
 | ジャンル                              | 検討中 | フロントエンド → 全員       |        | テーマごとの動画数、test の日本語動画数を調べてから決める。表は `python tools/mosu_genres.py`    |
-| 正解ラベルの変換方法                  | 検討中 | 評価・統合                  |        | Most Replayed → 1秒単位。今は `prepare_mosu.py` が MoSu の `gt_score` をそのまま使う（仮）       |
-| 統合の重み                            | 未着手 | 評価・統合                  |        | 単純平均と重み付き                                                                               |
+| 正解ラベルの変換方法                  | 実装済 | 評価・統合                  |        | `highlight_eval.py labels`（既定：`--gt-mode per_second`、`--normalize per_video`）。学習用の `prepare_mosu.py` は gt_score をそのまま使う（仮） |
+| 統合の重み                            | 着手   | 評価・統合                  |        | `highlight_eval.py ensemble` で単純平均（既定）と `--weights` の重み付きができる。重みの値は未定 |
 | 各自が改良するモダリティ              | 未着手 | 学習3人                     |        | 比較表を見てから決める                                                                           |
 | 共有データの置き場所                  | 未確定 | 全員                        |        | `HF_HOME` と `--data_dir` のパス                                                                 |
 | 本番のパーティション                  | 仮     | 全員                        |        | README の例は `a100_3g`。全員そろえる                                                            |
-| 切り抜き区間CSVの置き場所・区間の長さ | 未定   | 評価・統合 / フロントエンド |        | `video_id,rank,start,end`                                                                        |
+| 切り抜き区間CSVの置き場所・区間の長さ | 仮     | 評価・統合 / フロントエンド |        | `highlight_eval.py clips` の既定は30秒・上位3区間（重ならない）。置き場所は未定 |
 | `features/` `highlight/` の担当       | 未定   |                             |        |                                                                                                  |
 
 ---
@@ -352,6 +361,8 @@ main                      いつでも動く状態。直接 push しない
 | train / val / test     | 学習用 / 判断（調整）用 / 最後の評価用。test は最後に1回だけ                                          |
 | 統合                   | 複数のシステム・モダリティの予測を平均などでまとめること                                              |
 | Kendall τ / Spearman ρ | 予測と正解の「順位」がどれだけ一致しているかの指標（1に近いほど良い）                                 |
+| MAE                    | 予測と正解の差の絶対値の平均（0に近いほど良い）                                                       |
+| top10_overlap          | 正解で上位10%の秒と、予測で上位10%の秒がどれだけ重なるか（1に近いほど良い）                           |
 | F1                     | 選んだ区間と正解の区間の重なりの良さ（適合率と再現率の調和平均）                                      |
 | Slurm                  | 計算サーバのジョブ管理の仕組み。`sbatch`（投入）、`srun`（対話）、`squeue`（確認）、`scancel`（停止） |
 | パーティション         | GPU の種類ごとの区分（例：`a100_1g`、`a100_3g`）                                                      |
@@ -396,7 +407,7 @@ main                      いつでも動く状態。直接 push しない
 
 ### 8.2 transformer.py をサーバに持っていく
 
-**2026-11-04 に main へ push 済み（d76d96e）** → ②で `git pull` するだけでよい。以下は今後ファイルを変えたとき用。
+**チームのリポジトリ（tkg-tus/pj-5）にも入っている（e066fdc）** → ②で `git pull` するだけでよい。以下は今後ファイルを変えたとき用。
 
 - **おすすめ：ブランチで push**（①で）
 
@@ -450,7 +461,10 @@ sbatch -J train_transformer_visual -p a100_3g --gres=gpu:3g.40gb:1 \
 
 - `runs_mosu/transformer_{modality}_seed{n}/summary.json`：最良のval誤差・学習時間・パラメータ数・GPU
 - グラフで見る：`python tools/demo_mosu.py --run runs_mosu/transformer_visual_seed0 --n 5 --remote` → `demo_out/all.png`（青=予測、赤=正解）
-- 提出：`pred_val.csv`（3モダリティ × 3シード＝9個）を評価・統合担当に渡す。どのコミットで学習したかを9章に書く
+- 自分で評価してみる：評価・統合担当の正解CSV（`highlight_eval.py labels` で作ったもの）を使って
+  `python evaluation/highlight_eval.py evaluate --truth <正解CSV> --pred runs_mosu/transformer_visual_seed0/pred_val.csv --output eval/transformer_visual_seed0.csv`
+  → Spearman ρ・MAE・top10_overlap が表示される（正解CSVと動画・秒数が完全に一致している必要がある）
+- 提出：`pred_val.csv`（3モダリティ × 3シード＝9個）を評価・統合担当に渡す（`compare` で GRU などと並べて比べてもらう）。どのコミットで学習したかを9章に書く
 
 ### 8.7 うまくいかないとき
 
@@ -459,6 +473,7 @@ sbatch -J train_transformer_visual -p a100_3g --gres=gpu:3g.40gb:1 \
 | `No module named 'systems.transformer'` | ②に `transformer.py` がない → 8.2                                                                  |
 | `.venv がない` と出て終わる           | ②で `uv sync --locked`                                                                             |
 | `data_mosu がない` と出て終わる       | 8.3 をやっていない                                                                                 |
+| `時間軸が不一致` と出る（評価）       | 正解CSVと予測の動画・秒数が合っていない。同じ val の動画で作ったか確認                             |
 | ずっと `PD`                           | GPU が混んでいる。待つ                                                                             |
 | `CUDA out of memory`                  | `transformer.py` の `N_LAYERS` や `D_MODEL` を下げる（`--batch_size` は今の sbatch からは渡せない） |
 | `Killed`                              | メインメモリ不足。`--n_train` を減らす                                                             |
@@ -486,3 +501,7 @@ sbatch -J train_transformer_visual -p a100_3g --gres=gpu:3g.40gb:1 \
 | 2026-11-04 | 学習（EI） | —             | `EI.md` | 記録履歴を9章にし、8章に transformer をサーバで学習させる手順を追加 | なし |
 | 2026-11-04 | 学習（EI） | main | `EI.md` | EI.md を Git の除外設定から外し、コミット・push するように変更 | なし |
 | 2026-11-04 | 学習（EI） | main | `systems/transformer.py`、`EI.md` | 損失を BCE から平均二乗誤差（MSE）に変更（チームの統一に合わせる） | なし |
+| 2026-11-04 | 学習（EI） | tkg-tus main（e066fdc） | `systems/transformer.py` | transformer.py（MSE 版）をチームのリポジトリにアップロード | `git pull` |
+| 2026-11-04 | 学習       | tkg-tus main（0f2117b） | `systems/gru.py`（新規） | 双方向 GRU（GRUScorer）を追加。sigmoid 出力・MSE | `git pull` |
+| 2026-11-04 | 評価・統合 | tkg-tus main（c7e64fc） | `evaluation/highlight_eval.py`（新規）、`pyproject.toml`、`uv.lock` | 評価・統合のコードを追加（labels / evaluate / compare / ensemble / clips / plot）。scipy・pandas を追加 | **`uv sync --locked` し直す** |
+| 2026-11-06 | 学習（EI） | main（11c282e） | `EI.md` | upstream（tkg-tus）をマージし、評価コード・gru.py・依存の追加に合わせて EI.md を更新 | なし |

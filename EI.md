@@ -13,7 +13,7 @@ README.md は「使い方」、この EI.md は「決まりごと・詳細・注
 4. [注意点](#4-注意点)
 5. [未決定事項・決定ログ](#5-未決定事項決定ログ)
 6. [用語集](#6-用語集)
-7. [今やること：サーバで学習させる手順（transformer・gru・_smoke）](#7-今やることサーバで学習させる手順transformergru_smoke)
+7. [今やること：学習（モダリティごとの改善と、渡し方をそろえる）](#7-今やること学習モダリティごとの改善と渡し方をそろえる)
 8. [学習結果（outcome/）のまとめ・評価・改善点](#8-学習結果outcomeのまとめ評価改善点)
 9. [質問に対する回答](#9-質問に対する回答)
 10. [全員がわかるためのコードの追加修正の記録履歴](#10-全員がわかるためのコードの追加修正の記録履歴)（※この項目は常に最後に置く）
@@ -50,11 +50,28 @@ runs/{system}_{modality}_seed{n}/   best.pt, pred_val.csv, summary.json
 
 ### 1.2 担当とやること
 
-| 担当           | 人数 | やること                                                                                                                                                                                                                            |
-| -------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 学習システム   | 3人  | ①各自で学習システムを実装（`systems/{自分のシステム名}.py`）<br>②映像・音声・字幕の3つすべてを、シード0・1・2で学習し、valの予測CSV（`pred_val.csv`）を提出<br>③比較の後、各自が担当する情報（モダリティ）を1つ決めて改良           |
-| 評価・統合     | 1人  | ①正解ラベル（Most Replayed を1秒単位にしたもの）の変換コード。動作確認用に数十本分を先に渡し、変換方法とジャンルが決まったらまとめて変換<br>②評価方法の検討、評価スクリプト、「システム×情報」の比較表<br>③単純平均と重み付きの統合 |
-| フロントエンド | 1人  | ①ジャンルの下調べ（テーマごとの動画数、test にある日本語動画の数）→全員でジャンル決定<br>②Most Replayed を仮スコアにして、グラフ・見どころランキング・区間再生（YouTube埋め込み）<br>③予測がそろったら統合スコアに差し替え          |
+**今の分担（2026-11-26 から）**
+
+| 担当                      | やること                                                                                                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 学習（**EI**）            | ①モダリティごとに合うモデルへの特化（映像・音声・字幕それぞれで改善）<br>②ファインチューニングへの渡し方をそろえる（下の「渡し方の決まり」）                         |
+| ファインチューニング      | 人手評価の問題作り、票を使った最終層（`head`）の調整                                                                                                                     |
+| フロントエンド            | HTML への移行                                                                                                                                                            |
+| 評価・統合                | 生の動画から特徴量（映像・音声・字幕、各768次元/秒）への変換                                                                                                             |
+| フロントエンド × 評価統合 | 変換の結果はフロントエンドでそのまま使うので、受け渡しの形を2人で決める。変換をどこで動かすか（ブラウザの中では重いので、Python で先に変換しておく形になりそう）も決める |
+
+**ファインチューニングへの渡し方の決まり（学習とファインチューニングの約束）**
+
+- モデルは `encode(X, M)` と `head` に分ける
+  - X：（バッチ, 秒数, 768）、M：（バッチ, 秒数）。本物の秒が True
+  - `encode` の出力：（バッチ, 秒数, 128）
+- `head` は `nn.Linear(128, 1)` だけ。後ろに sigmoid などの関数は入れない
+- `forward` は `head(encode(X, M))` の値をそのまま返す（切り抜き・評価もこの値を使う）
+- 学習し直すときは、人手評価用に取っておく動画（`ja_holdout.txt`）を `prepare_mosu.py --exclude_list` で外す
+  - `ja_holdout.txt` は MoSu の配布物ではない。人手評価の問題に使う MoSu の動画（主に MoSu の train にある日本語のゲーム動画）の video_id を、チームが1行に1つ書いたリスト（9.18）
+- 理由：ファインチューニングでは `encode` をそのまま使い、人手評価の票で `head` だけを調整する。`head` の形がそろっていれば、どのモデルでも同じ方法で調整できる
+
+※ 11月までの分担：学習3人が各自で学習システム（CNN・GRU・Transformer）を作って比較（8章）、評価・統合が正解ラベルと評価スクリプト、フロントエンドがジャンルの下調べと仮の画面。
 
 ### 1.3 進め方（順番）
 
@@ -145,6 +162,8 @@ pj-5/
 │   ├── genre_candidates.py 人手評価に使うジャンル（タイトル）の候補を、本数・長さ・YouTube で見られるかで並べる
 │   ├── make_questions.py   人手評価の問題ファイル（questions_{set_id}.json）を作る
 │   └── analyze_modalities.py モダリティごとの得意な形と、モダリティ間の相関を調べる
+├── ei_tools/               EI の個人用ツール（チームのリポジトリには入れない）
+│   └── plot_seed_mean.py   demo_mosu.py の結果を3シード平均にし、モダリティごとに正解と3システムを1枚に重ねる（7.3）
 ├── outcome/                学習結果の比較表（compare_*.csv、summary_*.csv。8章）
 ├── powerpoint/             中間発表のスライドとテンプレート
 ├── docs/
@@ -206,6 +225,7 @@ def train_one_epoch(model, data, opt, args, dev, rng):
 - `from train import batches` で共通のバッチ関数が使える
 - オプティマイザは `train.py` が作る（AdamW、lr は共通）。各自で変えない
 - 出力の大きさは自由（評価前に動画ごとに0〜1へ正規化される）
+- **これからは、モデルを `encode(X, M)`（出力（バッチ, 秒数, 128））と `head`（`nn.Linear(128, 1)` だけ）に分ける**（1.2「渡し方の決まり」、7.2）
 
 ---
 
@@ -282,11 +302,11 @@ def train_one_epoch(model, data, opt, args, dev, rng):
 | 場面               | やること                                                                                                                                               | 注意                                                                     |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | 環境構築           | **ログインノード**で `uv sync --locked`（初めての人は `docs/server_setup.md` を最初から）                                                              | 計算ノードには uv が入っていない                                         |
-| データ準備         | ログインノードで `python tools/prepare_mosu.py --modality visual --n_train 200 --n_val 50 --remote`（→ `data_mosu/`）                                  | **audio・text も `--modality` を変えて同じ値で作る**（7.3）。test は使わない。正解は仮（`gt_score`） |
-| GPUテスト          | `sbatch -J gpu_test -p a100_1g --gres=gpu:1g.10gb:1 --qos=low --export=ALL,SYSTEM=transformer jobs/gpu_test.sbatch`                                    | 結果は `runs_test/`。`DATA=data_fake` で偽データ。3システムまとめては 7.4 |
+| データ準備         | ログインノードで `python tools/prepare_mosu.py --modality visual --n_train 200 --n_val 50 --remote`（→ `data_mosu/`）                                  | **audio・text も `--modality` を変えて同じ値で作る**（7.6）。test は使わない。正解は仮（`gt_score`） |
+| GPUテスト          | `sbatch -J gpu_test -p a100_1g --gres=gpu:1g.10gb:1 --qos=low --export=ALL,SYSTEM=transformer jobs/gpu_test.sbatch`                                    | 結果は `runs_test/`。`DATA=data_fake` で偽データ。3システムまとめては 7.7 |
 | 動作確認           | `srun -p a100_1g --gres=gpu:1g.10gb:1 --qos=inter --pty bash` → `source .venv/bin/activate` → `python train.py ... --subset 5 --max_epochs 2` → `exit` | 対話セッションは30分まで。終わったら必ず `exit`                          |
 | 動作確認（ジョブ） | `sbatch -J smoke -p a100_1g --gres=gpu:1g.10gb:1 --qos=low --export=ALL,SYSTEM=transformer jobs/smoke.sbatch`                                          | 結果は `runs_smoke/`。SYSTEM の既定は `fast` なので指定する              |
-| 本番               | `sbatch -J train_<名前>_<modality> -p a100_3g --gres=gpu:3g.40gb:1 --export=ALL,SYSTEM=<名前>,MODALITY=<modality> jobs/train.sbatch`                   | **プロジェクトのルートで実行**（ジョブは sbatch を実行した場所で始まる）。SYSTEM は必ず指定。9ジョブまとめては 7.5 |
+| 本番               | `sbatch -J train_<名前>_<modality> -p a100_3g --gres=gpu:3g.40gb:1 --export=ALL,SYSTEM=<名前>,MODALITY=<modality> jobs/train.sbatch`                   | **プロジェクトのルートで実行**（ジョブは sbatch を実行した場所で始まる）。SYSTEM は必ず指定。9ジョブまとめては 7.8 |
 | 確認・停止         | `squeue -u "$USER"` / `tail -f logs/<ジョブ名>-<ジョブID>.out` / `scancel <ジョブID>`                                                                  | 不要なジョブは止める                                                     |
 
 - `--qos` は所属によって異なる → サーバ利用ガイド 2.2 を確認
@@ -349,7 +369,12 @@ main                      いつでも動く状態。直接 push しない
 | 人手評価                              | 着手   | （未確認）                  |        | `tools/make_questions.py` で問題ファイルを作り、`human_eval.html` で回答を集める。使う動画・人数・集計方法は未定 |
 | 正解ラベルの変換方法                  | 実装済 | 評価・統合                  |        | `highlight_eval.py labels`（既定：`--gt-mode per_second`、`--normalize per_video`）。学習用の `prepare_mosu.py` は gt_score をそのまま使う（仮） |
 | 統合の重み                            | 着手   | 評価・統合                  |        | `highlight_eval.py ensemble` で単純平均（既定）と `--weights` の重み付きができる。重みの値は未定 |
-| 各自が改良するモダリティ              | 未着手 | 学習3人                     |        | 比較表を見てから決める                                                                           |
+| 各自が改良するモダリティ              | 変更   | 学習（EI）                  | 2026-11-26 | 新しい分担で、学習（EI）が映像・音声・字幕の3つとも改善する（1.2）                            |
+| 新しい分担                            | 決定   | 全員                        | 2026-11-26 | 学習（EI）・ファインチューニング・フロントエンド・評価統合（1.2）                                |
+| ファインチューニングへの渡し方        | 決定   | 学習 / ファインチューニング | 2026-11-26 | `encode(X, M)` →（バッチ, 秒数, 128）、`head` = `nn.Linear(128, 1)` だけ（1.2）                 |
+| `ja_holdout.txt` の置き場所・作る人   | 未確定 | （未確認）                  |        | 人手評価用に学習から外す動画のリスト（MoSu の video_id。MoSu の配布物ではなくチームが作る、9.18）。まだリポジトリにない |
+| `gru.py` の encode / head 化          | 未確定 | （未確認）                  |        | `gru.py` を学習（EI）が引き継ぐか、作った人が直すか                                              |
+| 特徴量の受け渡しの形・変換を動かす場所 | 検討中 | フロントエンド × 評価統合   |        | Python で先に変換しておく形になりそう                                                            |
 | 共有データの置き場所                  | 未確定 | 全員                        |        | `HF_HOME` と `--data_dir` のパス                                                                 |
 | 本番のパーティション                  | 仮     | 全員                        |        | README の例は `a100_3g`。全員そろえる                                                            |
 | 切り抜き区間CSVの置き場所・区間の長さ | 仮     | 評価・統合 / フロントエンド |        | `highlight_eval.py clips` の既定は30秒・上位3区間（重ならない）。置き場所は未定 |
@@ -388,9 +413,130 @@ main                      いつでも動く状態。直接 push しない
 
 ---
 
-## 7. 今やること：サーバで学習させる手順（transformer・gru・_smoke）
+## 7. 今やること：学習（モダリティごとの改善と、渡し方をそろえる）
 
-`systems/` のモデルを、サーバの GPU で「3システム × 3モダリティ × シード 0・1・2」学習させるまでの流れ。詳しいことは `docs/server_setup.md`。
+新しい分担（1.2）で、自分（EI）は**学習**を担当する（ファインチューニングではない）。7.1〜7.3 がやること、7.4 からはサーバで学習させる手順。
+
+### 7.1 やることの一覧
+
+1. **encode / head の形にする**：`systems/transformer.py`（と `systems/gru.py`）を、1.2「渡し方の決まり」の形に直す（7.2）
+2. **人手評価用の動画を外してデータを作り直す**：`prepare_mosu.py` に `--exclude_list ja_holdout.txt` を付ける（7.6）
+3. **学習し直す**：3モダリティ × シード 0・1・2（7.8）。encode / head にしたことで、8章の結果より大きく下がっていないか確かめる
+4. **モダリティごとに改善する**（8.5.4 の改善点を、1回に1つずつ試す）
+
+   | モダリティ | 今の最良（cod / game の ρ）                    | まず試すこと                                                                                     |
+   | ---------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+   | 映像       | GRU 0.406 / 0.383                              | GRU を基準にする。Transformer は入力の大きさをそろえる（8.5.4 の 1）                             |
+   | 音声       | GRU 0.392 / 0.360（Transformer 0.121 / 0.217） | どのシステムでも弱い。Transformer は 8.5.4 の 1 と過学習対策（3）。`best_epoch` が早すぎないか見る |
+   | 字幕       | GRU 0.424 / 0.361                              | 字幕のない秒が多い（9.10）。近くの秒の変化を拾う工夫（8.5.4 の 5）                               |
+
+5. **比べて決める**：`compare` の表（val 全体）と比較グラフ（7.3）で、モダリティごとに一番良いモデルを決める
+6. **渡す**：ファインチューニング担当に、モダリティごとの `best.pt` と、使ったシステム名・コミットIDを渡す
+
+**要確認**
+
+- `ja_holdout.txt` はまだリポジトリにない。MoSu の配布物ではなく、人手評価の問題（`questions_*.json`）に使う動画からチームが作るリスト（9.18）。置き場所と作る人を確認する（5章）
+- `--exclude_list` は `train.py` ではなく `tools/prepare_mosu.py` のオプション
+- `gru.py` を自分が引き継ぐか、作った人が直すか（5章）
+
+### 7.2 encode / head の形にする
+
+**transformer.py**：今の `forward` の中身を `encode` に移す。最後の `self.norm` まで `encode` に入れると、出力が（バッチ, 秒数, 128）になる。`head` は今の `nn.Linear(D_MODEL, 1)` のままでよい（`D_MODEL = 128`）。
+
+```python
+def encode(self, X, M):
+    # X:（バッチ, 秒数, 768）  M:（バッチ, 秒数） 本物の秒が True
+    h = self.inp(X) * math.sqrt(D_MODEL) + positional_encoding(X.shape[1], D_MODEL, X.device)
+    h = self.encoder(self.drop(h), src_key_padding_mask=~M)
+    return self.norm(h)                            # （バッチ, 秒数, 128）
+
+def forward(self, X, M):
+    return self.head(self.encode(X, M)).squeeze(-1)  # head の値をそのまま返す（sigmoid なし）
+```
+
+- 8.5.4 の改善（入力の大きさをそろえるなど）は `encode` の中で行う。`head` は変えない
+- 8.5.4 の 4（出力を sigmoid で0〜1にする）は、決まりで `head` の後ろに関数を入れないので**使わない**
+
+**gru.py**：双方向で隠れ64 × 2 = 128 なので、`encode` の出力はもう128次元になっている。`forward` の最後の `torch.sigmoid` を外し、GRU の部分を `encode` にまとめる。
+
+- sigmoid を外すと出力の範囲が変わるので、**必ず学習し直す**
+- 損失は今と同じ MSE（正解は0〜1）。評価の前に動画ごとに0〜1へ正規化されるので、出力が0〜1の外に出ても評価は変わらない
+
+### 7.3 結果をグラフで比べる（3シード平均・システムを重ねる）
+
+`tools/demo_mosu.py` の27回分の結果（`demo_out/<システム>_<モダリティ>_seed<n>/pred.csv`）をまとめて比べる。どちらもサーバのログインノードで、`~/pj-5` から実行する。
+
+**方法A：個人用ツール `ei_tools/plot_seed_mean.py`（おすすめ）**
+
+モダリティごとに1枚、計3枚のグラフを作る。各グラフの行が動画（5本）で、赤＝MoSu の正解、灰＝CNN、緑＝GRU、青＝Transformer。システムの線は3シードの平均（平均してから0〜1にそろえ直したもの）。
+
+```bash
+source .venv/bin/activate
+python ei_tools/plot_seed_mean.py --demo_dir demo_out --out demo_out/seed_mean
+```
+
+| 出力                                      | 中身                                                                                                         |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `demo_out/seed_mean/visual.png`           | 映像：正解と、CNN・GRU・Transformer のシード平均。各行のタイトルに、システムごとの Spearman ρ               |
+| `demo_out/seed_mean/audio.png`            | 音声：同じ形                                                                                                 |
+| `demo_out/seed_mean/text.png`             | 字幕：同じ形                                                                                                 |
+| `demo_out/seed_mean/scores.csv`           | 動画ごとの ρ と、5本の平均（`video_id` が `(mean)` の行）。画面にもシステム × モダリティの表で出る         |
+
+自分の PC にコピー：`scp -r s<学籍番号>@<サーバのアドレス>:~/pj-5/demo_out/seed_mean .`
+
+- 正解は `mosu/mosu_gt.h5` から読む（正解CSVを作る必要はない）
+- 動画は、27個の結果に共通して入っているもの。`demo_mosu.py` を同じ `--seed`（既定 0）で回していれば5本ともそろう
+- 足りないシードがあっても、あるシードだけで平均する（警告が出る）。凡例に「mean of N seeds」と、使ったシードの数が出る
+- `--systems`・`--modalities`・`--seeds` で、描く対象をしぼれる（例：`--systems gru transformer`）
+- 5本だけなので、良し悪しは val 全体の `compare`（`outcome/`）で決める。このグラフは予測の形を目で確かめるためのもの
+
+**方法B：チーム共通のツールだけで行う**（1動画ごとに大きく見たいとき）
+
+今ある `evaluation/highlight_eval.py` の `ensemble`（3シードの平均）と `plot`（1枚に重ねる）でまとめる。
+
+```bash
+source .venv/bin/activate
+
+# ① demo_out の5本の動画で、正解CSVを作る
+printf "GgNJ\nJ3Ee\nVPkk\ncyRr\nqRKo\n" > demo_out/demo_ids.txt
+python evaluation/highlight_eval.py labels --gt mosu/mosu_gt.h5 --metadata mosu/mosu_metadata.csv \
+  --ids demo_out/demo_ids.txt --output demo_out/truth_demo.csv
+
+# ② pred.csv を名前を分けてコピー（同じ名前「pred」だとエラーになるため）
+mkdir -p demo_out/seeds demo_out/mean demo_out/compare
+for d in demo_out/*_seed*/; do n=$(basename "$d"); cp "$d/pred.csv" "demo_out/seeds/$n.csv"; done
+
+# ③ 3シードを平均（システム × モダリティの9通り）
+for s in _smoke gru transformer; do for m in visual audio text; do
+  python evaluation/highlight_eval.py ensemble \
+    --preds demo_out/seeds/${s}_${m}_seed0.csv demo_out/seeds/${s}_${m}_seed1.csv demo_out/seeds/${s}_${m}_seed2.csv \
+    --normalize-output per_video --truth demo_out/truth_demo.csv \
+    --output demo_out/mean/${s}_${m}.csv
+done; done
+
+# ④ 動画ごと・モダリティごとに、正解と3システム（シード平均）を1枚に重ねる（15枚）
+for m in visual audio text; do for v in GgNJ J3Ee VPkk cyRr qRKo; do
+  python evaluation/highlight_eval.py plot --truth demo_out/truth_demo.csv \
+    --preds demo_out/mean/_smoke_${m}.csv demo_out/mean/gru_${m}.csv demo_out/mean/transformer_${m}.csv \
+    --video-id $v --output demo_out/compare/${m}_${v}.png
+done; done
+
+# ⑤ 数値でまとめる（9通りの ρ・MAE・top10 を、ρ の高い順に表示）
+python evaluation/highlight_eval.py compare --truth demo_out/truth_demo.csv \
+  --pred-dir demo_out/mean --output demo_out/compare/scores.csv
+```
+
+自分の PC にコピー：`scp -r s<学籍番号>@<サーバのアドレス>:~/pj-5/demo_out/compare .`
+
+- 動画IDは、`demo_mosu.py` を `--seed 0`（既定）で実行したときのもの。`--seed` や学習データを変えたら、`demo_out/<名前>/` の png のファイル名から ID を確かめて ① を書き替える
+- グラフの凡例は、ファイル名（`_smoke_visual` など。`_smoke` は CNN）
+- `ensemble` の `--truth` を付けているので、③で平均したあとの ρ なども表示される
+- **限界**：シードのばらつき（帯）は描けない。グラフは1動画1枚。5本だけなので、モデルの良し悪しは val 全体の `compare`（`outcome/`）で決める。グラフは予測の形を目で確かめるためのもの
+- 出力はすべて `demo_out/` の中なので、Git に入らない
+
+---
+
+以下、7.4〜7.10 はサーバで学習させる手順。詳しいことは `docs/server_setup.md`。
 
 **3つの場所**（どこで何をするか）
 
@@ -415,14 +561,14 @@ main                      いつでも動く状態。直接 push しない
 
 | 手順 | やること | どこで | 済んだかの確かめ方 |
 | --- | --- | --- | --- |
-| 7.1 | 下準備（ssh・鍵・clone・環境） | ①② | `ls ~/pj-5/.venv` がある |
-| 7.2 | コードを最新にする | ② | `ls systems` に3つのシステムがある |
-| 7.3 | データを用意する（3モダリティ） | ② | `ls data_mosu/features` に3つある |
-| 7.4 | 小さく試す（gpu_test） | ②で投入 | ログに `パラメータ数` が出る |
-| 7.5 | 本番（9ジョブ） | ②で投入 | `ls runs_mosu` に27個 |
-| 7.6 | 結果を見る・提出する | ② | — |
+| 7.4 | 下準備（ssh・鍵・clone・環境） | ①② | `ls ~/pj-5/.venv` がある |
+| 7.5 | コードを最新にする | ② | `ls systems` に3つのシステムがある |
+| 7.6 | データを用意する（3モダリティ） | ② | `ls data_mosu/features` に3つある |
+| 7.7 | 小さく試す（gpu_test） | ②で投入 | ログに `パラメータ数` が出る |
+| 7.8 | 本番（9ジョブ） | ②で投入 | `ls runs_mosu` に27個 |
+| 7.9 | 結果を見る・提出する | ② | — |
 
-### 7.1 最初に1回だけ（済んでいればとばす）
+### 7.4 最初に1回だけ（済んでいればとばす）
 
 `docs/server_setup.md` の 1-1〜1-6。済んでいるかの確かめ方は 9.15。
 
@@ -457,7 +603,7 @@ exit
 
 `True NVIDIA A100 ...` と出れば OK。**最後の `exit` を忘れない**（対話セッションは30分まで・1人1つ）。
 
-### 7.2 コードを最新にする（②で、学習の前に毎回）
+### 7.5 コードを最新にする（②で、学習の前に毎回）
 
 ```bash
 cd ~/pj-5
@@ -471,7 +617,7 @@ ls systems                   # transformer.py・gru.py・_smoke.py があるか
 - push せずに試すだけなら、①で `scp systems/transformer.py s<学籍番号>@<サーバのアドレス>:~/pj-5/systems/`
 - main に入れる前に見てもらいたいときは、ブランチ（`git switch -c feature/ei-transformer`）で push して PR を作る（4.3）
 
-### 7.3 データを用意する（②で）
+### 7.6 データを用意する（②で）
 
 **3つのモダリティを1つずつ作る**（`prepare_mosu.py` は1回で1つのモダリティしか作らない）。
 
@@ -488,6 +634,14 @@ python tools/prepare_mosu.py --modality text   --n_train 200 --n_val 50 --remote
 - `data_mosu/` に train 200本・val 50本ができる（test は使わない。正解は仮の `gt_score`）
 - チームの結果と比べるなら、学習した人と同じ値にする（8章の比較は cod：val 142本、game：val 1,045本）
 - README.md・`docs/server_setup.md` には visual の例しか書いていない（動作確認用の最小の手順のため）。本番には3つとも必要
+- **学習し直すときは、人手評価用の動画を外す**（1.2「渡し方の決まり」）。3モダリティとも同じ `--exclude_list` を付ける
+
+  ```bash
+  python tools/prepare_mosu.py --modality visual --n_train 200 --n_val 50 --remote --exclude_list ja_holdout.txt
+  ```
+
+  - 「`ja_holdout.txt` の N本は使わない」と表示されれば外れている
+  - 前のデータと混ざらないように、出力先（`data_mosu/`）を消してから作るか、別のフォルダにする
 
 **確かめる**
 
@@ -498,7 +652,7 @@ ls data_mosu/features/audio  | wc -l
 ls data_mosu/features/text   | wc -l
 ```
 
-### 7.4 小さく動くか確かめる（②で投入）
+### 7.7 小さく動くか確かめる（②で投入）
 
 3システムを、visual・3エポックだけで試す。
 
@@ -531,9 +685,9 @@ gpu: NVIDIA A100 80GB PCIe MIG 1g.10gb
 
 - 結果は `runs_test/{システム}_visual_seed0/`。本番の結果とは別のフォルダ
 - 3エポックだけなので、ここでの誤差の値は気にしない
-- 失敗したら `tail -n 30 logs/gpu_test_<システム>-<ジョブID>.out` でエラーを見る（7.7）
+- 失敗したら `tail -n 30 logs/gpu_test_<システム>-<ジョブID>.out` でエラーを見る（7.10）
 
-### 7.5 本番（3システム × 3モダリティ × シード 0・1・2）
+### 7.8 本番（3システム × 3モダリティ × シード 0・1・2）
 
 1ジョブ＝1システム × 1モダリティ（中でシード0→1→2を順に学習する）。9ジョブをまとめて投入する。
 
@@ -570,7 +724,7 @@ ls runs_mosu                                          # 全部終われば 27 �
 - 同じ `OUT=` で同じシステム・モダリティをもう一度学習すると上書きされる。前の結果を残すなら `OUT=runs_mosu_v2` のように分ける（9.13）
 - 正式なデータ（`data/`）ができたら、`DATA=` と `OUT=` を外す（既定の `data/`・`runs/` になる）
 
-### 7.6 結果を見る・提出する
+### 7.9 結果を見る・提出する
 
 **学習の記録をまとめて見る**（best_epoch・最良のval誤差・学習時間）
 
@@ -598,18 +752,19 @@ python evaluation/highlight_eval.py evaluate --truth <正解CSV> \
 - Spearman ρ・MAE・top10_overlap が表示される（正解CSVと動画・秒数が完全に一致している必要がある）
 - 提出：`pred_val.csv`（1システムにつき 3モダリティ × 3シード＝9個）を評価・統合担当に渡す（`compare` で並べて比べてもらう）。どのコミットで学習したか（`git log --oneline -1`）も伝える
 - 結果（`runs_mosu/`）は Git に入らない（`.gitignore`）。チームの結果を見たいときは 9.16
+- `demo_mosu.py` に `--out demo_out/<名前>` を付けて保存先を分けて27個作ると、7.3 の手順でシステムを重ねたグラフにできる。どのコミットで学習したかは10章にも書く
 
-### 7.7 うまくいかないとき
+### 7.10 うまくいかないとき
 
 | 症状 | 対処 |
 | --- | --- |
-| `No module named 'systems.〇〇'` | `SYSTEM=` の打ちまちがい（`ls systems` で確認）か、指定し忘れ（既定の `fast` はない）。ファイルがないなら 7.2 |
+| `No module named 'systems.〇〇'` | `SYSTEM=` の打ちまちがい（`ls systems` で確認）か、指定し忘れ（既定の `fast` はない）。ファイルがないなら 7.5 |
 | `.venv がない` と出て終わる | ②で `uv sync --locked` |
-| `data_mosu がない` と出て終わる | 7.3 をやっていない |
-| audio・text のジョブだけ、ファイルがないと出て止まる | 7.3 で audio・text を作っていない（`ls data_mosu/features` で確認） |
+| `data_mosu がない` と出て終わる | 7.6 をやっていない |
+| audio・text のジョブだけ、ファイルがないと出て止まる | 7.6 で audio・text を作っていない（`ls data_mosu/features` で確認） |
 | `時間軸が不一致` と出る（評価） | 正解CSVと予測の動画・秒数が合っていない。同じ val の動画で作ったか確認 |
 | ずっと `PD` | GPU が混んでいる。待つ |
-| `srun` のあとすぐ入力に戻った | 正常。もう③に入っている（7.1） |
+| `srun` のあとすぐ入力に戻った | 正常。もう③に入っている（7.4） |
 | `CUDA out of memory` | `transformer.py` の `N_LAYERS` や `D_MODEL` を下げる（`--batch_size` は今の sbatch からは渡せない） |
 | `Killed` | メインメモリ不足。`--n_train` を減らす |
 | 投入で `qos` や `partition` のエラー | `--qos=low` を足す。所属の `--qos` はサーバ利用ガイド 2.2 |
@@ -886,7 +1041,7 @@ h = self.in_norm(self.inp(X)) + positional_encoding(X.shape[1], D_MODEL, X.devic
 - 入力の直後の Dropout を強くする（特徴量の一部を隠しても当てられるように学習させる）。
 - モデルを小さくする：`N_LAYERS = 1`、または `D_MODEL = 64`。そのとき `N_HEAD` は `D_MODEL` を割り切れる数（2 か 4）にする。
 
-**4. 出力を0〜1にする**
+**4. 出力を0〜1にする**（※ 2026-11-26 の「渡し方の決まり」（1.2）で `head` の後ろに関数を入れないことになったので、**今は使わない**）
 
 ```python
 return torch.sigmoid(self.head(self.norm(h)).squeeze(-1))   # GRU と同じ
@@ -982,7 +1137,7 @@ EI.md・README.md・コード・MoSu の論文をもとにした回答。
 
 ### 9.5 Transformer の精度を上げるために取り組むこと（口頭用）
 
-> Transformer は、字幕では GRU に近い成績でしたが、映像と音声では低く、シードによるばらつきも大きいという結果でした。原因として、入力を約11倍に大きくしているために位置の情報が埋もれ、学習が不安定になっている可能性を考えています。そこで、まず掛け算をやめて、LayerNorm で入力の大きさをそろえます。次に学習の記録を見て、過学習なのか学習不足なのかを切り分け、過学習なら dropout を上げたり、モデルを小さくしたりします。あわせて、出力を0〜1に収めることと、畳み込みを足して近くの秒の変化も拾えるようにすることを、1つずつ試していく予定です。
+> Transformer は、字幕では GRU に近い成績でしたが、映像と音声では低く、シードによるばらつきも大きいという結果でした。原因として、入力を約11倍に大きくしているために位置の情報が埋もれ、学習が不安定になっている可能性を考えています。そこで、まず掛け算をやめて、LayerNorm で入力の大きさをそろえます。次に学習の記録を見て、過学習なのか学習不足なのかを切り分け、過学習なら dropout を上げたり、モデルを小さくしたりします。あわせて、畳み込みを足して近くの秒の変化も拾えるようにすることを試します。また、ファインチューニングにそのまま渡せるように、モデルを特徴を作る部分（encode）と最後の1層（head）に分けた形にそろえます。
 
 ### 9.6 入力を約11倍（√128倍）にしている理由は？
 
@@ -1087,7 +1242,7 @@ EI.md・README.md・コード・MoSu の論文をもとにした回答。
 ### 9.12 学習はどうやればいい？（チームはもう学習したが、自分はまだのとき）
 
 - 学習は自分の PC ではなく、**サーバ**で行う。学習の結果（`runs*/`）は `.gitignore` に入っているので GitHub には上がらない。チームが学習していても、リポジトリの中身は変わらない。
-- 手順（打つコマンド）は **7章**にまとめてある：7.1 下準備 → 7.2 コードを最新に → 7.3 データ（3モダリティ）→ 7.4 gpu_test → 7.5 本番 → 7.6 結果。
+- 手順（打つコマンド）は **7章**にまとめてある：7.4 下準備 → 7.5 コードを最新に → 7.6 データ（3モダリティ）→ 7.7 gpu_test → 7.8 本番 → 7.9 結果。
 - **clone するのは `tomei0809/pj-5`（自分のリポジトリ）**
   - サーバで直したコードを、そのまま自分のリポジトリに push できる（本家 `tkg-tus` には push する権限がないことがある）。
   - 手元の PC と同じく `origin` = tomei0809、`upstream` = tkg-tus になる。本家の更新は `git pull upstream main` で取り込む。
@@ -1152,9 +1307,9 @@ EI.md・README.md・コード・MoSu の論文をもとにした回答。
 
 ### 9.16 サーバの下準備が終わったら、7章のどこから始める？チームの学習結果は見られる？
 
-- **7.2（コードを最新にする）→ 7.3（データを用意する）から始めればよい**
-  - 7.1（ssh・鍵・clone・`uv sync`）は、`docs/server_setup.md` の 1-1〜1-6 で済んでいる。
-  - clone した直後なら 7.2 もほぼ済んでいる（`ls ~/pj-5/systems` に `transformer.py`・`gru.py`・`_smoke.py` があればよい）。2回目以降は学習の前に毎回 7.2 をやる。
+- **7.5（コードを最新にする）→ 7.6（データを用意する）から始めればよい**
+  - 7.4（ssh・鍵・clone・`uv sync`）は、`docs/server_setup.md` の 1-1〜1-6 で済んでいる。
+  - clone した直後なら 7.5 もほぼ済んでいる（`ls ~/pj-5/systems` に `transformer.py`・`gru.py`・`_smoke.py` があればよい）。2回目以降は学習の前に毎回 7.5 をやる。
 - **チームの学習結果は、自分の clone には出てこない**
   - 結果（`best.pt`・`pred_val.csv`・`summary.json`）は、学習した人のフォルダ（その人の `~/pj-5/runs*/`）にしかない。`runs*/` は `.gitignore` の対象なので、clone しても届かない。
   - リポジトリに入っている結果は `outcome/`（比較表の CSV）だけ。モデルの重みや予測は入っていないので、グラフを描いたり評価し直したりはできない。
@@ -1165,7 +1320,7 @@ EI.md・README.md・コード・MoSu の論文をもとにした回答。
 cd ~/pj-5
 ls                                   # runs_mosu/ や data_mosu/ があるか
 ls runs* 2>/dev/null                 # 自分の結果（何も出なければ、まだ学習していない）
-ls data_mosu 2>/dev/null             # データ（何も出なければ、まだ 7.3 をしていない）
+ls data_mosu 2>/dev/null             # データ（何も出なければ、まだ 7.6 をしていない）
 ls /home/<その人>/pj-5/runs_mosu/    # チームの人の結果（Permission denied なら読む権限がない）
 squeue -u "$USER"                    # 今動いている自分のジョブ
 ```
@@ -1175,11 +1330,23 @@ squeue -u "$USER"                    # 今動いている自分のジョブ
 ### 9.17 7章のコマンドの打ち方と、transformer 以外（CNN・GRU）も学習するには？
 
 - **コマンドの打ち方**は7章の冒頭にまとめた（打つのは ```bash の枠の中だけ、`#` はコメント、`< >` は自分の値に置き換える、`for` 〜 `done` は何行あっても1つのコマンド、行末の `\` は次の行とつながる）。
-- **CNN・GRU も学習する** → `SYSTEM=` を変えるだけ（名前は `systems/` のファイル名）。7.4・7.5 のコマンドは、`for s in _smoke gru transformer` で3システムをまとめて投入する形になっている。
+- **CNN・GRU も学習する** → `SYSTEM=` を変えるだけ（名前は `systems/` のファイル名）。7.7・7.8 のコマンドは、`for s in _smoke gru transformer` で3システムをまとめて投入する形になっている。
 - CNN は `_smoke`（2段の1次元CNN、テスト用）を使う。ちゃんとした1次元CNN（3.1）は、まだ push されていないのでリポジトリにない。
 - `SYSTEM=` は**必ず指定する**。`train.sbatch` の既定は `fast` だが、`systems/fast.py` は存在しないのでエラーになる。
-- 本番には audio・text のデータも要る。README.md・`docs/server_setup.md` は visual の例しか書いていないので、7.3 のとおり3つとも作る。
+- 本番には audio・text のデータも要る。README.md・`docs/server_setup.md` は visual の例しか書いていないので、7.6 のとおり3つとも作る。
 - 1つずつ投入したいときは、`for` を使わずに `SYSTEM=` と `MODALITY=` を書き換えて1行ずつ打てばよい（例：`sbatch -J train_gru_visual -p a100_3g --gres=gpu:3g.40gb:1 --export=ALL,SYSTEM=gru,MODALITY=visual,DATA=data_mosu,OUT=runs_mosu jobs/train.sbatch`）。
+
+### 9.18 ja_holdout.txt は学習用だから、MoSu のデータにあるのでは？
+
+- **ファイルとしては、MoSu にはない**。MoSu で配布されているのは、分け方（`mosu_split.json`）・メタデータ（`mosu_metadata.csv`）・正解（`mosu_gt.h5`）・特徴量（`mosu_feat_*.h5`）だけ。
+- **中に書く動画は、MoSu の動画**（video_id は MoSu のID）。
+- 作り方の流れ：
+  1. `tools/find_ja_videos.py` で、MoSu のゲームの動画から日本語の動画を探す（→ `ja_game_videos.csv`）
+  2. `tools/make_questions.py` で、人手評価の問題（`questions_{set_id}.json`）を作る
+  3. 問題に使った動画の video_id を1行に1つ書いたものが `ja_holdout.txt`
+- `make_questions.py` は、MoSu で **train** に入っている動画を `"split": "holdout"` と書き換えている。つまり、もともと学習用（train）の動画を、人手評価のために**学習から外して取っておく**、という意味。
+- そのため「学習用の動画が入っている」のは正しい。ただしファイルは MoSu に入っておらず、チーム（人手評価・ファインチューニングの担当）が作る。まだリポジトリにはないので、置き場所と作る人を確認する（5章）。
+- 外し方：`prepare_mosu.py --exclude_list ja_holdout.txt`（7.6）。外さないと、人手評価に使う動画をモデルが学習してしまい、人手評価が公平でなくなる。
 
 ---
 

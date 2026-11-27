@@ -13,7 +13,7 @@ README.md は「使い方」、この EI.md は「決まりごと・詳細・注
 4. [注意点](#4-注意点)
 5. [未決定事項・決定ログ](#5-未決定事項決定ログ)
 6. [用語集](#6-用語集)
-7. [今やること：transformer を学習させる手順](#7-今やることtransformer-を学習させる手順)
+7. [今やること：サーバで学習させる手順（transformer・gru・_smoke）](#7-今やることサーバで学習させる手順transformergru_smoke)
 8. [学習結果（outcome/）のまとめ・評価・改善点](#8-学習結果outcomeのまとめ評価改善点)
 9. [質問に対する回答](#9-質問に対する回答)
 10. [全員がわかるためのコードの追加修正の記録履歴](#10-全員がわかるためのコードの追加修正の記録履歴)（※この項目は常に最後に置く）
@@ -282,11 +282,11 @@ def train_one_epoch(model, data, opt, args, dev, rng):
 | 場面               | やること                                                                                                                                               | 注意                                                                     |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
 | 環境構築           | **ログインノード**で `uv sync --locked`（初めての人は `docs/server_setup.md` を最初から）                                                              | 計算ノードには uv が入っていない                                         |
-| データ準備         | ログインノードで `python tools/prepare_mosu.py --modality visual --n_train 200 --n_val 50 --remote`（→ `data_mosu/`）                                  | test は使わない。正解は仮（`gt_score`）                                  |
-| GPUテスト          | `sbatch -J gpu_test -p a100_1g --gres=gpu:1g.10gb:1 --qos=low --export=ALL,SYSTEM=transformer jobs/gpu_test.sbatch`                                    | 結果は `runs_test/`。`DATA=data_fake` で偽データ                         |
+| データ準備         | ログインノードで `python tools/prepare_mosu.py --modality visual --n_train 200 --n_val 50 --remote`（→ `data_mosu/`）                                  | **audio・text も `--modality` を変えて同じ値で作る**（7.3）。test は使わない。正解は仮（`gt_score`） |
+| GPUテスト          | `sbatch -J gpu_test -p a100_1g --gres=gpu:1g.10gb:1 --qos=low --export=ALL,SYSTEM=transformer jobs/gpu_test.sbatch`                                    | 結果は `runs_test/`。`DATA=data_fake` で偽データ。3システムまとめては 7.4 |
 | 動作確認           | `srun -p a100_1g --gres=gpu:1g.10gb:1 --qos=inter --pty bash` → `source .venv/bin/activate` → `python train.py ... --subset 5 --max_epochs 2` → `exit` | 対話セッションは30分まで。終わったら必ず `exit`                          |
 | 動作確認（ジョブ） | `sbatch -J smoke -p a100_1g --gres=gpu:1g.10gb:1 --qos=low --export=ALL,SYSTEM=transformer jobs/smoke.sbatch`                                          | 結果は `runs_smoke/`。SYSTEM の既定は `fast` なので指定する              |
-| 本番               | `sbatch -J train_<名前>_<modality> -p a100_3g --gres=gpu:3g.40gb:1 --export=ALL,SYSTEM=<名前>,MODALITY=<modality> jobs/train.sbatch`                   | **プロジェクトのルートで実行**（ジョブは sbatch を実行した場所で始まる） |
+| 本番               | `sbatch -J train_<名前>_<modality> -p a100_3g --gres=gpu:3g.40gb:1 --export=ALL,SYSTEM=<名前>,MODALITY=<modality> jobs/train.sbatch`                   | **プロジェクトのルートで実行**（ジョブは sbatch を実行した場所で始まる）。SYSTEM は必ず指定。9ジョブまとめては 7.5 |
 | 確認・停止         | `squeue -u "$USER"` / `tail -f logs/<ジョブ名>-<ジョブID>.out` / `scancel <ジョブID>`                                                                  | 不要なジョブは止める                                                     |
 
 - `--qos` は所属によって異なる → サーバ利用ガイド 2.2 を確認
@@ -388,9 +388,9 @@ main                      いつでも動く状態。直接 push しない
 
 ---
 
-## 7. 今やること：transformer を学習させる手順
+## 7. 今やること：サーバで学習させる手順（transformer・gru・_smoke）
 
-`systems/transformer.py` をサーバの GPU で学習させるまでの流れ。詳しいことは `docs/server_setup.md`。
+`systems/` のモデルを、サーバの GPU で「3システム × 3モダリティ × シード 0・1・2」学習させるまでの流れ。詳しいことは `docs/server_setup.md`。
 
 **3つの場所**（どこで何をするか）
 
@@ -401,87 +401,219 @@ main                      いつでも動く状態。直接 push しない
 | ③ 計算ノード（GPU）      | `train.py` が動く（ジョブを出すと自動で動く。自分で入る必要はない） |
 
 - ②で重い処理（学習）はしない。学習は必ず `sbatch` で③にやってもらう
-- コマンドはすべて**プロジェクトのフォルダ（`~/<リポジトリ名>`）で**実行する
+- コマンドはすべて**プロジェクトのフォルダ（`~/pj-5`）で**実行する
+
+**コマンドの打ち方**
+
+- 打つのは ```bash の枠の中だけ。`#` から右はコメントなので打たなくてよい
+- `<ジョブID>` のような `< >` の部分は、自分の値に置き換える
+- `for ... do` 〜 `done` は、何行あっても**1つのコマンド**。まとめてコピーして一度に貼り付ける
+- 行の最後が `\` のときは、次の行とつながった1つのコマンド
+- `tail -f` は `Ctrl+C` で抜ける（ジョブは止まらない）
+
+**全体の流れ**
+
+| 手順 | やること | どこで | 済んだかの確かめ方 |
+| --- | --- | --- | --- |
+| 7.1 | 下準備（ssh・鍵・clone・環境） | ①② | `ls ~/pj-5/.venv` がある |
+| 7.2 | コードを最新にする | ② | `ls systems` に3つのシステムがある |
+| 7.3 | データを用意する（3モダリティ） | ② | `ls data_mosu/features` に3つある |
+| 7.4 | 小さく試す（gpu_test） | ②で投入 | ログに `パラメータ数` が出る |
+| 7.5 | 本番（9ジョブ） | ②で投入 | `ls runs_mosu` に27個 |
+| 7.6 | 結果を見る・提出する | ② | — |
 
 ### 7.1 最初に1回だけ（済んでいればとばす）
 
-1. 学内ネットか VPN につないで、①から `ssh s<学籍番号>@<サーバのアドレス>`
-2. 公開鍵の登録、サーバから GitHub への鍵の登録（`docs/server_setup.md` 1-2・1-3）
-3. ②で `git clone git@github.com:tkg-tus/pj-5.git` → `cd pj-5`
-4. ②で `uv sync --locked`（`.venv` ができる。数分かかる）
+`docs/server_setup.md` の 1-1〜1-6。済んでいるかの確かめ方は 9.15。
 
-### 7.2 transformer.py をサーバに持っていく
+```bash
+# ①で：サーバに入る（学内ネットか VPN につないでから）
+ssh s<学籍番号>@<サーバのアドレス>
 
-**チームのリポジトリ（tkg-tus/pj-5）にも入っている（e066fdc）** → ②で `git pull` するだけでよい。以下は今後ファイルを変えたとき用。
+# ②で：clone して環境を作る
+cd ~
+git clone git@github.com:tomei0809/pj-5.git                 # ~/pj-5 ができる
+cd pj-5
+git remote add upstream git@github.com:tkg-tus/pj-5.git     # 本家の更新も取り込めるようにする
+uv sync --locked                                            # .venv ができる（数分）。uv lock は打たない（9.14）
+```
 
-- **おすすめ：ブランチで push**（①で）
+- clone するのは自分のリポジトリ（tomei0809）。理由は 9.12
 
-  ```bash
-  git switch -c feature/ei-transformer
-  git add systems/transformer.py
-  git commit -m "systems/transformer.py を追加"
-  git push -u origin feature/ei-transformer
-  ```
+**GPU が見えるか確かめる**（1-6。③に30分だけ入る）
 
-  ②で `git fetch` → `git switch feature/ei-transformer`。main に入れるのは、PR を作って1人以上に見てもらってから
+```bash
+srun -p a100_1g --gres=gpu:1g.10gb:1 --qos=inter --pty bash
+```
 
-- **push せずに試すだけ**（①で）：`scp systems/transformer.py s<学籍番号>@<サーバのアドレス>:~/pj-5/systems/`
+`has been allocated resources` と出てすぐ入力に戻ったら、もう③に入っている。続けて次を打つ。
+
+```bash
+cd ~/pj-5
+source .venv/bin/activate
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+exit
+```
+
+`True NVIDIA A100 ...` と出れば OK。**最後の `exit` を忘れない**（対話セッションは30分まで・1人1つ）。
+
+### 7.2 コードを最新にする（②で、学習の前に毎回）
+
+```bash
+cd ~/pj-5
+git pull                     # 自分のリポジトリ（tomei0809）の最新
+git pull upstream main       # 本家（tkg-tus）の最新も取り込む
+uv sync --locked             # uv.lock が変わっていたときのため（変わっていなければすぐ終わる）
+ls systems                   # transformer.py・gru.py・_smoke.py があるか
+```
+
+- コードを直して試すとき：①で push → ②で `git pull`
+- push せずに試すだけなら、①で `scp systems/transformer.py s<学籍番号>@<サーバのアドレス>:~/pj-5/systems/`
+- main に入れる前に見てもらいたいときは、ブランチ（`git switch -c feature/ei-transformer`）で push して PR を作る（4.3）
 
 ### 7.3 データを用意する（②で）
 
+**3つのモダリティを1つずつ作る**（`prepare_mosu.py` は1回で1つのモダリティしか作らない）。
+
 ```bash
+cd ~/pj-5
 source .venv/bin/activate
 python tools/prepare_mosu.py --modality visual --n_train 200 --n_val 50 --remote
+python tools/prepare_mosu.py --modality audio  --n_train 200 --n_val 50 --remote
+python tools/prepare_mosu.py --modality text   --n_train 200 --n_val 50 --remote
 ```
 
+- 1行ずつ打ち、終わって入力に戻ってから次を打つ（1つ数分〜十数分）
+- **3つとも同じ値**（`--n_train`・`--n_val`・タグなど）にする。同じ値なら同じ動画が選ばれ、同じ `data_mosu/` に足される
 - `data_mosu/` に train 200本・val 50本ができる（test は使わない。正解は仮の `gt_score`）
-- audio・text も使うときは `--modality audio`、`--modality text` で同じコマンドをもう一度。同じ動画が選ばれ、同じ `data_mosu/` に足される
+- チームの結果と比べるなら、学習した人と同じ値にする（8章の比較は cod：val 142本、game：val 1,045本）
+- README.md・`docs/server_setup.md` には visual の例しか書いていない（動作確認用の最小の手順のため）。本番には3つとも必要
+
+**確かめる**
+
+```bash
+ls data_mosu/features                     # audio  text  visual の3つ
+ls data_mosu/features/visual | wc -l      # 3つとも同じ本数（この例なら 250）
+ls data_mosu/features/audio  | wc -l
+ls data_mosu/features/text   | wc -l
+```
 
 ### 7.4 小さく動くか確かめる（②で投入）
 
-```bash
-sbatch -J gpu_test -p a100_1g --gres=gpu:1g.10gb:1 --qos=low --export=ALL,SYSTEM=transformer jobs/gpu_test.sbatch
-squeue -u "$USER"                    # PD=順番待ち、R=実行中、消えたら終了
-tail -f logs/gpu_test-<ジョブID>.out   # Ctrl+C で見るのをやめる（ジョブは止まらない）
-```
-
-- 最後に `gpu: NVIDIA A100 ...` と `パラメータ数: 363777`（約36万）が出れば成功
-- 結果は `runs_test/transformer_visual_seed0/`（`best.pt`・`pred_val.csv`・`summary.json`）
-
-### 7.5 本番（3モダリティ × シード 0・1・2）
-
-1モダリティにつき1ジョブ（中でシード0→1→2を順に学習する）。3つ投入する。
+3システムを、visual・3エポックだけで試す。
 
 ```bash
-sbatch -J train_transformer_visual -p a100_3g --gres=gpu:3g.40gb:1 \
-  --export=ALL,SYSTEM=transformer,MODALITY=visual,DATA=data_mosu,OUT=runs_mosu jobs/train.sbatch
+cd ~/pj-5
+for s in _smoke gru transformer; do
+  sbatch -J gpu_test_$s -p a100_1g --gres=gpu:1g.10gb:1 --qos=low --export=ALL,SYSTEM=$s jobs/gpu_test.sbatch
+done
 ```
 
-- audio・text は `-J` と `MODALITY=` を変えて同じように投入
-- 正式なデータ（`data/`）ができたら、`DATA=` と `OUT=` を外す（既定の `data/`・`runs/` になる）
+`Submitted batch job 12367` のように3行出れば投入できている。
+
+```bash
+squeue -u "$USER"                 # PD=順番待ち、R=実行中。何も出なくなったら全部終わり（数分）
+tail -n 5 logs/gpu_test_*.out     # 3つの結果をまとめて見る
+```
+
+**成功したときの表示**（それぞれの最後）
+
+```
+gpu: NVIDIA A100 80GB PCIe MIG 1g.10gb
+学習時間: 2.3 秒 / パラメータ数: 320385 / 最良のval誤差: 0.1106
+```
+
+| システム | パラメータ数 |
+| --- | --- |
+| `_smoke` | 147713 |
+| `gru` | 320385 |
+| `transformer` | 363777 |
+
+- 結果は `runs_test/{システム}_visual_seed0/`。本番の結果とは別のフォルダ
+- 3エポックだけなので、ここでの誤差の値は気にしない
+- 失敗したら `tail -n 30 logs/gpu_test_<システム>-<ジョブID>.out` でエラーを見る（7.7）
+
+### 7.5 本番（3システム × 3モダリティ × シード 0・1・2）
+
+1ジョブ＝1システム × 1モダリティ（中でシード0→1→2を順に学習する）。9ジョブをまとめて投入する。
+
+```bash
+cd ~/pj-5
+for s in _smoke gru transformer; do
+  for m in visual audio text; do
+    sbatch -J train_${s}_${m} -p a100_3g --gres=gpu:3g.40gb:1 --export=ALL,SYSTEM=$s,MODALITY=$m,DATA=data_mosu,OUT=runs_mosu jobs/train.sbatch
+  done
+done
+```
+
+`Submitted batch job` が9行出れば投入できている。
+
+```bash
+squeue -u "$USER"                                     # 何も出なくなったら全部終わり（数十分〜）
+tail -f logs/train_transformer_visual-<ジョブID>.out  # 1つの進み具合を見る（Ctrl+C で抜ける）
+ls runs_mosu                                          # 全部終われば 27 個（9ジョブ × 3シード）
+```
+
+| SYSTEM= | 中身 |
+| --- | --- |
+| `transformer` | Transformer Encoder（自分の担当） |
+| `gru` | 双方向 GRU |
+| `_smoke` | 2段の1次元CNN（テスト用。8章で「CNN」として比べたもの。ちゃんとした1次元CNN（3.1）は未push） |
+
+- **`SYSTEM=` は必ず指定する**。`train.sbatch` の既定は `fast` だが、`systems/fast.py` はないのでエラーになる
+- **1人が同時に入れておけるジョブは8個まで**（`QOSMaxSubmitJobPerUserLimit`）。9つ目（ループの最後の transformer × text）は失敗するので、`squeue` が8行より少なくなってから、それだけを投入する：
+  `sbatch -J train_transformer_text -p a100_3g --gres=gpu:3g.40gb:1 --export=ALL,SYSTEM=transformer,MODALITY=text,DATA=data_mosu,OUT=runs_mosu jobs/train.sbatch`
+- 1つのシステムだけやり直すときは、`for s in transformer; do` のように1つだけにする
+- 学習率・エポック・シードは、`train.sbatch` と `train.py` の既定値がチームのルール（1.4）どおり。`--lr` や `--max_epochs` は付けない
 - 学習時間を比べるので、パーティションは全員 `a100_3g` にそろえる
-- `--qos` は所属で違う（サーバ利用ガイド 2.2）
+- `--qos` は所属で違う（サーバ利用ガイド 2.2）。投入でエラーが出たら `-p a100_3g` の後ろに `--qos=low` を足す
+- 同じ `OUT=` で同じシステム・モダリティをもう一度学習すると上書きされる。前の結果を残すなら `OUT=runs_mosu_v2` のように分ける（9.13）
+- 正式なデータ（`data/`）ができたら、`DATA=` と `OUT=` を外す（既定の `data/`・`runs/` になる）
 
 ### 7.6 結果を見る・提出する
 
-- `runs_mosu/transformer_{modality}_seed{n}/summary.json`：最良のval誤差・学習時間・パラメータ数・GPU
-- グラフで見る：`python tools/demo_mosu.py --run runs_mosu/transformer_visual_seed0 --n 5 --remote` → `demo_out/all.png`（青=予測、赤=正解）
-- 自分で評価してみる：評価・統合担当の正解CSV（`highlight_eval.py labels` で作ったもの）を使って
-  `python evaluation/highlight_eval.py evaluate --truth <正解CSV> --pred runs_mosu/transformer_visual_seed0/pred_val.csv --output eval/transformer_visual_seed0.csv`
-  → Spearman ρ・MAE・top10_overlap が表示される（正解CSVと動画・秒数が完全に一致している必要がある）
-- 提出：`pred_val.csv`（3モダリティ × 3シード＝9個）を評価・統合担当に渡す（`compare` で GRU などと並べて比べてもらう）。どのコミットで学習したかを10章に書く
+**学習の記録をまとめて見る**（best_epoch・最良のval誤差・学習時間）
+
+```bash
+cd ~/pj-5
+source .venv/bin/activate
+for d in runs_mosu/*/; do
+  python -c "import json,sys; s=json.load(open(sys.argv[1]+'summary.json')); print(sys.argv[1], 'best_epoch', s['best_epoch'], 'val誤差', round(s['best_val_error'],4), '時間', s['train_sec'], '秒')" "$d"
+done
+```
+
+**グラフで見る**（青=予測、赤=正解 → `demo_out/all.png`）
+
+```bash
+python tools/demo_mosu.py --run runs_mosu/transformer_visual_seed0 --n 5 --remote
+```
+
+**自分で評価してみる**（評価・統合担当の正解CSV＝`highlight_eval.py labels` で作ったものを使う）
+
+```bash
+python evaluation/highlight_eval.py evaluate --truth <正解CSV> \
+  --pred runs_mosu/transformer_visual_seed0/pred_val.csv --output eval/transformer_visual_seed0.csv
+```
+
+- Spearman ρ・MAE・top10_overlap が表示される（正解CSVと動画・秒数が完全に一致している必要がある）
+- 提出：`pred_val.csv`（1システムにつき 3モダリティ × 3シード＝9個）を評価・統合担当に渡す（`compare` で並べて比べてもらう）。どのコミットで学習したか（`git log --oneline -1`）も伝える
+- 結果（`runs_mosu/`）は Git に入らない（`.gitignore`）。チームの結果を見たいときは 9.16
 
 ### 7.7 うまくいかないとき
 
-| 症状                                  | 対処                                                                                               |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `No module named 'systems.transformer'` | ②に `transformer.py` がない → 7.2                                                                  |
-| `.venv がない` と出て終わる           | ②で `uv sync --locked`                                                                             |
-| `data_mosu がない` と出て終わる       | 7.3 をやっていない                                                                                 |
-| `時間軸が不一致` と出る（評価）       | 正解CSVと予測の動画・秒数が合っていない。同じ val の動画で作ったか確認                             |
-| ずっと `PD`                           | GPU が混んでいる。待つ                                                                             |
-| `CUDA out of memory`                  | `transformer.py` の `N_LAYERS` や `D_MODEL` を下げる（`--batch_size` は今の sbatch からは渡せない） |
-| `Killed`                              | メインメモリ不足。`--n_train` を減らす                                                             |
+| 症状 | 対処 |
+| --- | --- |
+| `No module named 'systems.〇〇'` | `SYSTEM=` の打ちまちがい（`ls systems` で確認）か、指定し忘れ（既定の `fast` はない）。ファイルがないなら 7.2 |
+| `.venv がない` と出て終わる | ②で `uv sync --locked` |
+| `data_mosu がない` と出て終わる | 7.3 をやっていない |
+| audio・text のジョブだけ、ファイルがないと出て止まる | 7.3 で audio・text を作っていない（`ls data_mosu/features` で確認） |
+| `時間軸が不一致` と出る（評価） | 正解CSVと予測の動画・秒数が合っていない。同じ val の動画で作ったか確認 |
+| ずっと `PD` | GPU が混んでいる。待つ |
+| `srun` のあとすぐ入力に戻った | 正常。もう③に入っている（7.1） |
+| `CUDA out of memory` | `transformer.py` の `N_LAYERS` や `D_MODEL` を下げる（`--batch_size` は今の sbatch からは渡せない） |
+| `Killed` | メインメモリ不足。`--n_train` を減らす |
+| 投入で `qos` や `partition` のエラー | `--qos=low` を足す。所属の `--qos` はサーバ利用ガイド 2.2 |
+| `QOSMaxSubmitJobPerUserLimit`（job submit limit） | 同時に入れておけるジョブ数（8個）の上限。投入済みのジョブはそのまま動く。`squeue` で空きができてから、失敗した分だけ投入する（全部やり直さない） |
 
 ---
 
@@ -951,6 +1083,103 @@ EI.md・README.md・コード・MoSu の論文をもとにした回答。
 - 人が「この音なら見どころ」と決めているのではなく、データから学ばせている。
 - **どれくらい一致しているかの測り方**：val の動画で、予測と正解の Spearman ρ・MAE・top10 を `highlight_eval.py` で計算する（8章・9.8）。
 - **論文での比較**：1つのモダリティだけで比べると、映像が一番強く、音声が字幕より少し良い。3つを合わせると一番良くなる（5.4）。手元の結果（8章）では、cod は text、game は visual が一番良く、データによって変わる。
+
+### 9.12 学習はどうやればいい？（チームはもう学習したが、自分はまだのとき）
+
+- 学習は自分の PC ではなく、**サーバ**で行う。学習の結果（`runs*/`）は `.gitignore` に入っているので GitHub には上がらない。チームが学習していても、リポジトリの中身は変わらない。
+- 手順（打つコマンド）は **7章**にまとめてある：7.1 下準備 → 7.2 コードを最新に → 7.3 データ（3モダリティ）→ 7.4 gpu_test → 7.5 本番 → 7.6 結果。
+- **clone するのは `tomei0809/pj-5`（自分のリポジトリ）**
+  - サーバで直したコードを、そのまま自分のリポジトリに push できる（本家 `tkg-tus` には push する権限がないことがある）。
+  - 手元の PC と同じく `origin` = tomei0809、`upstream` = tkg-tus になる。本家の更新は `git pull upstream main` で取り込む。
+  - 本家の内容はマージ済みなので、学習に使うコードはどちらから clone しても同じ。
+- **フォルダは `~/pj-5` でよい**
+  - `git clone` は、その場所にリポジトリ名のフォルダを自動で作る。
+  - 手元の PC が `C:\pj-5\pj-5` なのは、先に `C:\pj-5` を作ってその中で clone したから（外側はただの入れ物）。
+  - `train.py` や `.git` が直下にあるフォルダがプロジェクトのフォルダで、コマンドはすべてそこで実行する。
+- **clone は人ごとに別のコピー**：同じリポジトリから clone しても、結果は自分のホームの `~/pj-5/runs*/` に出るので、他の人とはぶつからない（9.13）。
+- 結果は `runs_mosu/{システム}_{モダリティ}_seed{n}/`（`best.pt`・`pred_val.csv`・`summary.json`）に出る。
+- チームの結果と比べるなら、学習した人に「データの作り方（`--n_train` などの値・タグ・`--exclude_list`）、`DATA`、`OUT`」を聞いて、同じ値にする。
+
+### 9.13 同じサーバで学習すると、結果がぶつかる（上書きされる）ことはある？
+
+- 結果の保存先は、**sbatch を実行したフォルダの中**の `{OUT}/{システム}_{モダリティ}_seed{n}/`（`train.py` の `out = f"{args.out_dir}/..."`）。
+
+| 状況 | ぶつかるか |
+| --- | --- |
+| 各自が自分のアカウントの `~/pj-5` で実行する | **ぶつからない**（フォルダが別なので、同じ名前の結果でも別の場所に保存される） |
+| 同じフォルダで、同じシステム・モダリティ・シードを2回実行する | **上書きされる**（前の `best.pt` などが消える） |
+| 同じフォルダで、システム名かモダリティが違う | ぶつからない（フォルダ名が違う） |
+| ログ（`logs/`） | ぶつからない（ファイル名にジョブID が入る：`logs/%x-%j.out`） |
+| Git | ぶつからない（`runs*/`・`data_mosu/`・`logs/` は `.gitignore` の対象で、push されない） |
+
+- **共有領域のデータ**：全員が `--data_dir <共有パス>` で読むだけなら問題ない。ただし2人が**同時に**同じ場所へ `prepare_mosu.py` で書き込むと、ファイルが壊れることがある。データを作るのは1人だけにする。
+- **前の結果を残したいとき**：設定を変えて学習し直すときは、`OUT=runs_mosu_v2` のように保存先を分ける。
+
+### 9.14 uv.lock はどう扱えばいい？
+
+- `pyproject.toml`：使いたいパッケージの**希望**（例：`torch>=2.13.0`）
+- `uv.lock`：実際に入れる**正確なバージョン**の記録。全員がこれを使うと、同じ環境になる
+
+| やりたいこと | コマンド |
+| --- | --- |
+| `git pull` のあと（特に `uv.lock` が変わったとき） | `uv sync --locked` |
+| パッケージを追加したい | **先にチームに相談** → `uv add <パッケージ名>` → `pyproject.toml` と `uv.lock` を**両方**コミット |
+| マージで `uv.lock` が競合した | 手で直さない。`git checkout --theirs uv.lock` → `uv lock` → `git add uv.lock` |
+
+- `uv.lock` は手で編集しない。
+- `--locked` を付けると、`uv.lock` と `pyproject.toml` が食い違っているときにエラーで止まる。知らないうちに環境がずれるのを防げる。
+- **`uv lock` は実行しない**
+  - `uv lock` は `uv.lock` を作る・更新するコマンド。`uv.lock` はリポジトリに入っているので、clone すればサーバにも届く。サーバでやるのは、それを読んで環境を作る `uv sync --locked` だけ。
+  - `docs/server_setup.md` 1-5 の `uv lock` は「`uv.lock` がまだない、または `pyproject.toml` を変えたときだけ」の条件付き。今はどちらにも当てはまらない。
+  - うっかり実行して `uv.lock` が変わったら、`git checkout -- uv.lock` で元に戻してから `uv sync --locked` をやり直す。
+  - 必要になるのは、チームで相談して `pyproject.toml` を変えたときだけ。その場合も `uv add` が `uv.lock` を自動で更新する。
+
+### 9.15 サーバの下準備（`docs/server_setup.md` の 1-1〜1-3）が済んでいるかの確かめ方
+
+| 手順 | どこで | 確かめるコマンド | 済んでいれば |
+| --- | --- | --- | --- |
+| 1-1 ログイン | ① | `ssh s<学籍番号>@<サーバのアドレス>` | ログインできる（初期パスワードの変更を求められない） |
+| 1-2 公開鍵（① → サーバ） | ① | 同上 | **パスワードを聞かれずに**ログインできる |
+| 1-2（念のため） | ② | `cat ~/.ssh/authorized_keys` | ①の `cat ~/.ssh/id_ed25519.pub` と同じ1行が入っている |
+| 1-3 サーバ → GitHub | ② | `ssh -T git@github.com` | `Hi <ユーザー名>! You've successfully authenticated` と出る |
+| 1-3（名前とメール） | ② | `git config --global user.name` / `git config --global user.email` | 名前とメールアドレスが表示される |
+| 1-4 clone | ② | `ls ~` | `pj-5` のフォルダがある |
+| 1-5 環境 | ② | `ls ~/pj-5/.venv` | `.venv` がある（なければ `uv sync --locked`） |
+
+- ①（自分の PC）の鍵は `~/.ssh/id_ed25519`（2026-11-05 作成）。サーバに接続した記録も `~/.ssh/known_hosts` にある。
+- `ssh -T git@github.com` で `Permission denied (publickey)` と出たら、1-3 はまだ。サーバで鍵を作り、GitHub に登録する。
+- `srun` で `has been allocated resources` と出て、すぐ入力を受け付ける状態に戻ったら、もう③（GPU のノード）に入っている。待たずに続きのコマンドを打つ（`hostname` で名前が変わっていれば③）。終わったら必ず `exit`。
+
+### 9.16 サーバの下準備が終わったら、7章のどこから始める？チームの学習結果は見られる？
+
+- **7.2（コードを最新にする）→ 7.3（データを用意する）から始めればよい**
+  - 7.1（ssh・鍵・clone・`uv sync`）は、`docs/server_setup.md` の 1-1〜1-6 で済んでいる。
+  - clone した直後なら 7.2 もほぼ済んでいる（`ls ~/pj-5/systems` に `transformer.py`・`gru.py`・`_smoke.py` があればよい）。2回目以降は学習の前に毎回 7.2 をやる。
+- **チームの学習結果は、自分の clone には出てこない**
+  - 結果（`best.pt`・`pred_val.csv`・`summary.json`）は、学習した人のフォルダ（その人の `~/pj-5/runs*/`）にしかない。`runs*/` は `.gitignore` の対象なので、clone しても届かない。
+  - リポジトリに入っている結果は `outcome/`（比較表の CSV）だけ。モデルの重みや予測は入っていないので、グラフを描いたり評価し直したりはできない。
+  - チームの結果を使いたいときは、学習した人に場所を聞く。読む権限があれば `--run` や `--pred` にそのパスを指定し、なければ共有領域に置いてもらう。
+- **確かめるコマンド**（②で）
+
+```bash
+cd ~/pj-5
+ls                                   # runs_mosu/ や data_mosu/ があるか
+ls runs* 2>/dev/null                 # 自分の結果（何も出なければ、まだ学習していない）
+ls data_mosu 2>/dev/null             # データ（何も出なければ、まだ 7.3 をしていない）
+ls /home/<その人>/pj-5/runs_mosu/    # チームの人の結果（Permission denied なら読む権限がない）
+squeue -u "$USER"                    # 今動いている自分のジョブ
+```
+
+- 学習率・エポック（最大50、patience 5）・シード（0・1・2）・環境のルールは 1.4 に書いてある。`jobs/train.sbatch` と `train.py` の既定値がそのとおりになっているので、`--lr` や `--max_epochs` は付けない。
+
+### 9.17 7章のコマンドの打ち方と、transformer 以外（CNN・GRU）も学習するには？
+
+- **コマンドの打ち方**は7章の冒頭にまとめた（打つのは ```bash の枠の中だけ、`#` はコメント、`< >` は自分の値に置き換える、`for` 〜 `done` は何行あっても1つのコマンド、行末の `\` は次の行とつながる）。
+- **CNN・GRU も学習する** → `SYSTEM=` を変えるだけ（名前は `systems/` のファイル名）。7.4・7.5 のコマンドは、`for s in _smoke gru transformer` で3システムをまとめて投入する形になっている。
+- CNN は `_smoke`（2段の1次元CNN、テスト用）を使う。ちゃんとした1次元CNN（3.1）は、まだ push されていないのでリポジトリにない。
+- `SYSTEM=` は**必ず指定する**。`train.sbatch` の既定は `fast` だが、`systems/fast.py` は存在しないのでエラーになる。
+- 本番には audio・text のデータも要る。README.md・`docs/server_setup.md` は visual の例しか書いていないので、7.3 のとおり3つとも作る。
+- 1つずつ投入したいときは、`for` を使わずに `SYSTEM=` と `MODALITY=` を書き換えて1行ずつ打てばよい（例：`sbatch -J train_gru_visual -p a100_3g --gres=gpu:3g.40gb:1 --export=ALL,SYSTEM=gru,MODALITY=visual,DATA=data_mosu,OUT=runs_mosu jobs/train.sbatch`）。
 
 ---
 
